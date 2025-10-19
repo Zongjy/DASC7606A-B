@@ -1,8 +1,11 @@
 import logging
 import random
 from pathlib import Path
+import shutil
+import hashlib
 from typing import List, Tuple
 
+import cv2
 import numpy as np
 import torch
 import albumentations as A
@@ -12,16 +15,15 @@ from PIL import Image
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+VAL_RATIO = 0.1
+
 
 class ImageAugmenter:
     """Class to handle image augmentation operations using Albumentations."""
 
     def __init__(
         self,
-        augmentations_per_image: int = 5,
         seed: int = 42,
-        save_original: bool = True,
-        image_extensions: Tuple[str, ...] = (".png", ".jpg", ".jpeg"),
     ):
         """
         Initialize the ImageAugmenter.
@@ -29,41 +31,42 @@ class ImageAugmenter:
         Args:
             augmentations_per_image: Number of augmented versions per original image.
             seed: Random seed for reproducibility.
-            save_original: Whether to save the original image with prefix 'orig_'.
-            image_extensions: Tuple of valid image file extensions.
         """
-        self.augmentations_per_image = augmentations_per_image
         self.seed = seed
-        self.save_original = save_original
-        self.image_extensions = image_extensions
 
         self._set_seed()
 
-        # Define Albumentations pipeline
-        self.transform = A.Compose(
-            [
-                A.Rotate(limit=15, p=0.8),
-                A.HorizontalFlip(p=0.5),
-                A.ShiftScaleRotate(
-                    shift_limit=0.1,
-                    scale_limit=0.1,
-                    rotate_limit=0,
-                    p=0.8,
-                    border_mode=0,  # cv2.BORDER_CONSTANT
+        self.pipeline = A.Compose([
+            A.PadIfNeeded(min_height=40, min_width=40, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            A.RandomCrop(height=32, width=32, p=1.0),
+            A.HorizontalFlip(p=0.5),
+
+            A.OneOf([
+                A.ColorJitter(0.2, 0.2, 0.2, 0.1, p=1.0),
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+                A.HueSaturationValue(10, 15, 10, p=1.0),
+                A.Sharpen(alpha=(0.05, 0.15), lightness=(0.8, 1.2), p=1.0),
+            ], p=0.9),
+
+            A.OneOf([
+                A.GaussianBlur(blur_limit=3, p=1.0),
+                A.MotionBlur(blur_limit=3, p=1.0),
+                A.GaussNoise(std_range=(0.012, 0.022),   # ≈ 3~5.5 像素级 std
+                    mean_range=(0.0, 0.0),
+                    per_channel=False,
+                    noise_scale_factor=1.0,
+                    p=0.12,
                 ),
-                A.ColorJitter(
-                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.8
-                ),
-                A.OneOf(
-                    [
-                        A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-                        A.MotionBlur(blur_limit=7, p=0.5),
-                    ],
-                    p=0.3,
-                ),
-                A.RandomBrightnessContrast(p=0.2),
-            ]
-        )
+            ], p=0.15),
+
+            A.CoarseDropout(
+                num_holes_range=(1, 1),
+                hole_height_range=(6, 10),
+                hole_width_range=(6, 10),
+                fill=0,
+                p=0.25
+            ),
+        ])
 
     def _set_seed(self):
         """Set random seeds for reproducibility."""
@@ -72,90 +75,43 @@ class ImageAugmenter:
         torch.manual_seed(self.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
-
-    def augment_image(self, image: Image.Image) -> Image.Image:
+    
+    def transform(self, image: np.ndarray) -> np.ndarray:
         """
-        Apply augmentation transforms to a single image using Albumentations.
+        Apply augmentation to the input image.
 
         Args:
-            image: PIL Image to augment.
+            image: Input image as a NumPy array (H x W x C).
 
         Returns:
-            Augmented PIL Image.
+            Augmented image as a NumPy array.
         """
-        # Convert PIL to NumPy array (RGB)
-        image_np = np.array(image)
+        out = self.pipeline(image=image)
+        return out["image"]
 
-        # Apply Albumentations transform
-        augmented = self.transform(image=image_np)
-        augmented_image_np = augmented["image"]
+def _deterministic_split(files, val_ratio=VAL_RATIO, seed=42):
+    """按文件名+seed 做稳定划分，避免同源图跨集合。"""
+    def key(p: Path):
+        h = hashlib.md5((p.name + str(seed)).encode()).hexdigest()
+        return int(h, 16)
+    files = sorted([p for p in files if p.is_file()], key=key)
+    n_val = max(1, int(len(files) * val_ratio)) if len(files) > 0 else 0
+    return files[n_val:], files[:n_val]   # train, val
 
-        # Convert back to PIL Image
-        return Image.fromarray(augmented_image_np.astype(np.uint8))
-
-    def process_directory(self, input_dir: str, output_dir: str) -> None:
-        """
-        Augment all images in input directory and save to output directory.
-
-        Preserves folder structure. Skips files that fail to load.
-
-        Args:
-            input_dir: Path to input directory with class subfolders.
-            output_dir: Path to output directory for augmented images.
-        """
-        input_path = Path(input_dir)
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        count = 0
-
-        image_files = self._find_image_files(input_path)
-
-        logger.info(f"Found {len(image_files)} images to augment.")
-
-        for img_path in image_files:
-            try:
-                image = Image.open(img_path).convert("RGB")
-            except Exception as e:
-                logger.warning(f"Failed to load image {img_path}: {e}")
-                continue
-
-            # Determine output subdirectory
-            rel_dir = img_path.parent.relative_to(input_path)
-            target_dir = output_path / rel_dir
-            if not target_dir.exists():
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save original if requested
-            if self.save_original:
-                orig_name = f"orig_{img_path.name}"
-                image.save(target_dir / orig_name)
-
-            # Generate and save augmented versions
-            for i in range(self.augmentations_per_image):
-                augmented = self.augment_image(image.copy())
-                aug_name = f"aug_{i}_{img_path.name}"
-                augmented.save(target_dir / aug_name)
-                count += 1
-
-        logger.info(
-            f"Augmentation of {count} images completed. Output saved to: {output_dir}"
-        )
-
-    def _find_image_files(self, root: Path) -> List[Path]:
-        """
-        Recursively find all image files in directory.
-
-        Args:
-            root: Root directory path.
-
-        Returns:
-            List of image file paths.
-        """
-        files = []
-        for ext in self.image_extensions:
-            files.extend(root.rglob(f"*{ext}"))
-        return files
-
+def _norm_dir(out_dir: Path):
+    """
+    若 out_dir 以 'train' 结尾：使用其父目录做 augmented 根目录，
+    在其下创建 train/ 与 val/；
+    否则认为 out_dir 是 augmented 根目录，在其下创建 train/ 与 val/。
+    """
+    out_dir = Path(out_dir)
+    if out_dir.name == "train":
+        root = out_dir.parent
+    else:
+        root = out_dir
+    (root / "train").mkdir(parents=True, exist_ok=True)
+    (root / "val").mkdir(parents=True, exist_ok=True)
+    return root
 
 def augment_dataset(
     input_dir: str,
@@ -172,7 +128,64 @@ def augment_dataset(
         augmentations_per_image: Number of augmented versions per original image.
         seed: Random seed for reproducibility.
     """
-    augmenter = ImageAugmenter(
-        augmentations_per_image=augmentations_per_image, seed=seed, save_original=True
-    )
-    augmenter.process_directory(input_dir, output_dir)
+    augmenter = ImageAugmenter(seed=seed)
+
+    input_dir = Path(input_dir)
+    output_root = _norm_dir(Path(output_dir))
+
+    # 清空旧输出（可选：按需保留）
+    if (output_root / "train").exists():
+        shutil.rmtree(output_root / "train")
+    if (output_root / "val").exists():
+        shutil.rmtree(output_root / "val")
+    (output_root / "train").mkdir(parents=True, exist_ok=True)
+    (output_root / "val").mkdir(parents=True, exist_ok=True)
+
+    classes = sorted([d for d in input_dir.iterdir() if d.is_dir()])
+    for cls_dir in classes:
+        cls = cls_dir.name
+        out_tr = output_root / "train" / cls
+        out_va = output_root / "val" / cls
+        out_tr.mkdir(parents=True, exist_ok=True)
+        out_va.mkdir(parents=True, exist_ok=True)
+
+        originals = sorted([p for p in cls_dir.iterdir() if p.is_file()])
+        train_files, val_files = _deterministic_split(originals, 0.2, seed)
+
+
+        # val：只复制原图（干净分布）
+        for src in val_files:
+            img = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                continue
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            if img is None: 
+                continue
+            cv2.imwrite(str(out_va / src.name), img)
+
+        # train：可复制原图 + 生成 K 份增强图
+        for src in train_files:
+            img = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                continue
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            if img is None: 
+                continue
+
+            # save_original_train:
+            cv2.imwrite(str(out_tr / src.name), img)
+
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            for i in range(augmentations_per_image):
+                aug_img = augmenter.transform(image=img_rgb)
+                aug_bgr = cv2.cvtColor(aug_img, cv2.COLOR_RGB2BGR)
+                out_name = f"{src.stem}_aug{i}.png"
+                cv2.imwrite(str(out_tr / out_name), aug_bgr)
+
+    print(f"[OK] Offline dataset ready at: {output_root} (train/ + val/)")

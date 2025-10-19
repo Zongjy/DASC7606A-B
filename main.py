@@ -57,7 +57,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="CIFAR-10/100 Training Pipeline")
 
     # Dataset selection
-    parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100"], default="cifar10",
+    parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100"], default="cifar100",
                         help="Dataset to use (cifar10 or cifar100)")
 
     # Data paths
@@ -67,17 +67,17 @@ def parse_args():
                         help="Directory to save results")
 
     # Data augmentation
-    parser.add_argument("--aug_count", type=int, default=3,
+    parser.add_argument("--aug_count", type=int, default=4,
                         help="Number of augmentations per image")
 
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=30,
+    parser.add_argument("--num_epochs", type=int, default=200,
                         help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.001,
+    parser.add_argument("--lr", type=float, default=0.1,
                         help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-4,
+    parser.add_argument("--weight_decay", type=float, default=5e-4,
                         help="Weight decay (L2 penalty)")
 
     # Checkpointing

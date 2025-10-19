@@ -3,18 +3,38 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 import os
 
-def load_transforms():
+def load_transforms(train=True):
     """
     Load the data transformations
     """
     return transforms.Compose([
-        transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                (0.2675, 0.2565, 0.2761))
     ])
+
+def _resolve_train_val_dirs(base: str):
+    """
+    base 既可指向 augmented 根目录，也可指向 augmented/train。
+    返回 (train_dir, val_dir) 两个目录。
+    """
+    base = os.path.normpath(base)
+    if os.path.basename(base) == "train":
+        root = os.path.dirname(base)
+        train_dir = base
+        val_dir = os.path.join(root, "val")
+    else:
+        train_dir = os.path.join(base, "train")
+        val_dir = os.path.join(base, "val")
+    if not os.path.isdir(train_dir):
+        raise FileNotFoundError(f"train dir not found: {train_dir}")
+    if not os.path.isdir(val_dir):
+        raise FileNotFoundError(f"val dir not found: {val_dir}")
+    return train_dir, val_dir
 
 def load_data(data_dir, batch_size):
     """
@@ -29,32 +49,45 @@ def load_data(data_dir, batch_size):
         val_loader: The validation data loader
     """
     # Define data transformations: resize, convert to tensor, and normalize
-    data_transforms = load_transforms()
+    tr = load_transforms()
+    train_dir, val_dir = _resolve_train_val_dirs(data_dir)
+    
+    train_set = datasets.ImageFolder(root=train_dir, transform=tr)
+    val_set   = datasets.ImageFolder(root=val_dir,   transform=tr)
 
-    # Load the full dataset from the augmented data directory
-    full_dataset = datasets.ImageFolder(root=data_dir, transform=data_transforms)
-
-    # Split the dataset into training and validation sets (80/20 split)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator()
-    )
 
     # Create data loaders for training and validation
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     # Print dataset summary
     print(f"Dataset loaded from: {data_dir}")
-    print(f"Total images: {len(full_dataset)}")
-    print(f"Number of classes: {len(full_dataset.classes)}")
-    print(f"Class names: {full_dataset.classes}")
-    print(f"Training set size: {len(train_dataset)}")
-    print(f"Validation set size: {len(val_dataset)}")
+    print(f"Total images: {len(train_set) + len(val_set)}")
+    print(f"Number of classes: {len(train_set.classes)}")
+    print(f"Class names: {train_set.classes}")
+    print(f"Training set size: {len(train_set)}")
+    print(f"Validation set size: {len(val_set)}")
 
     return train_loader, val_loader
+
+
+def param_groups_weight_decay(model, weight_decay=5e-4):
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # 规则：
+        # 1) 所有 1D 参数（BN/LayerNorm 的 weight、所有 bias）不做衰减
+        # 2) 明确以 .bias 结尾的参数不做衰减
+        # 3) 其余（卷积/线性权重矩阵等）做衰减
+        if p.ndim == 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
 
 
 def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
@@ -70,9 +103,23 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
         optimizer: The optimizer
         scheduler: The scheduler
     """
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.SGD(
+        param_groups_weight_decay(model, weight_decay=5e-4),
+        lr=lr,
+        momentum=0.9,
+        weight_decay=weight_decay,
+        nesterov=True
+    )
+
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.2, patience=5,
+        threshold=1e-3, min_lr=1e-5
+    )
+
     return criterion, optimizer, scheduler
 
 
@@ -93,21 +140,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     correct = 0
     total = 0
 
+    scaler = GradScaler("cuda")
+
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
 
     for inputs, labels in progress_bar:
         inputs, labels = inputs.to(device), labels.to(device)
 
         # Zero the parameter gradients
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        with autocast("cuda"):
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
 
         # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         # Statistics
         running_loss += loss.item() * inputs.size(0)
@@ -149,8 +200,9 @@ def validate_epoch(model, dataloader, criterion, device):
             inputs, labels = inputs.to(device), labels.to(device)
 
             # Forward pass
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            with autocast("cuda"):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
 
             # Statistics
             running_loss += loss.item() * inputs.size(0)

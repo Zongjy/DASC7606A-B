@@ -67,13 +67,13 @@ def parse_args():
                         help="Directory to save results")
 
     # Data augmentation
-    parser.add_argument("--aug_count", type=int, default=4,
+    parser.add_argument("--aug_count", type=int, default=3,
                         help="Number of augmentations per image")
 
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=200,
+    parser.add_argument("--num_epochs", type=int, default=300,
                         help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.1,
                         help="Learning rate")

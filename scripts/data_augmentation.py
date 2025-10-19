@@ -37,10 +37,6 @@ class ImageAugmenter:
         self._set_seed()
 
         self.pipeline = A.Compose([
-            A.PadIfNeeded(min_height=40, min_width=40, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
-            A.RandomCrop(height=32, width=32, p=1.0),
-            A.HorizontalFlip(p=0.5),
-
             A.OneOf([
                 A.ColorJitter(0.2, 0.2, 0.2, 0.1, p=1.0),
                 A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
@@ -48,16 +44,19 @@ class ImageAugmenter:
                 A.Sharpen(alpha=(0.05, 0.15), lightness=(0.8, 1.2), p=1.0),
             ], p=0.9),
 
-            A.OneOf([
-                A.GaussianBlur(blur_limit=3, p=1.0),
-                A.MotionBlur(blur_limit=3, p=1.0),
-                A.GaussNoise(std_range=(0.012, 0.022),   # ≈ 3~5.5 像素级 std
-                    mean_range=(0.0, 0.0),
-                    per_channel=False,
-                    noise_scale_factor=1.0,
-                    p=0.12,
-                ),
-            ], p=0.15),
+            A.PadIfNeeded(min_height=40, min_width=40, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            A.RandomCrop(height=32, width=32, p=1.0),
+            A.HorizontalFlip(p=0.5),
+            # A.OneOf([
+            #     A.GaussianBlur(blur_limit=3, p=1.0),
+            #     A.MotionBlur(blur_limit=3, p=1.0),
+            #     A.GaussNoise(std_range=(0.012, 0.022),   # ≈ 3~5.5 像素级 std
+            #         mean_range=(0.0, 0.0),
+            #         per_channel=False,
+            #         noise_scale_factor=1.0,
+            #         p=0.12,
+            #     ),
+            # ], p=0.15),
 
             A.CoarseDropout(
                 num_holes_range=(1, 1),

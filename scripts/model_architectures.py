@@ -1,3 +1,5 @@
+import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
@@ -31,7 +33,6 @@ class SimpleCNN(nn.Module):
         return x
     
 ## WideResNet-28-10
-
 class BasicBlock(nn.Module):
     """Basic residual block used in WideResNet"""
     def __init__(self, in_planes, out_planes, stride, drop_rate=0.0):
@@ -59,8 +60,7 @@ class BasicBlock(nn.Module):
             out = F.dropout(out, p=self.drop_rate, training=self.training)
         out = self.conv2(out)
         return x + out
-
-
+    
 class NetworkBlock(nn.Module):
     """Stack of BasicBlocks"""
     def __init__(self, nb_layers, in_planes, out_planes, block, stride, drop_rate=0.0):
@@ -75,7 +75,6 @@ class NetworkBlock(nn.Module):
 
     def forward(self, x):
         return self.layer(x)
-
 
 class WideResNet(nn.Module):
     """
@@ -124,9 +123,109 @@ class WideResNet(nn.Module):
         out = out.view(-1, out.size(1))
         return self.fc(out)
 
+## ResNeXt-29, 16x64d
+
+class ResNeXtBottleneck(nn.Module):
+    """ResNeXt bottleneck for CIFAR (1x1 -> 3x3 group -> 1x1)"""
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, cardinality=16, base_width=64):
+        super().__init__()
+        # width per group scaled by stage "planes" (as in original ResNeXt)
+        D = int(math.floor(planes * (base_width / 64.0)))   # channels per group
+        C = cardinality * D                                 # total channels in the bottleneck
+        self.conv1 = nn.Conv2d(inplanes, C, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(C)
+        self.conv2 = nn.Conv2d(C, C, kernel_size=3, stride=stride, padding=1,
+                               groups=cardinality, bias=False)
+        self.bn2 = nn.BatchNorm2d(C)
+        self.conv3 = nn.Conv2d(C, planes * self.expansion, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.downsample = None
+        if stride != 1 or inplanes != planes * self.expansion:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes * self.expansion, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * self.expansion),
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+
+        out += identity
+        out = self.relu(out)
+        return out
+
+
+class ResNeXt29(nn.Module):
+    """
+    ResNeXt-29, 16x64d for CIFAR
+    depth=29 -> (29 - 2) / 9 = 3 bottleneck blocks per stage
+    stages planes: [64, 128, 256]; expansion=4 -> output channels [256, 512, 1024]
+    """
+    def __init__(self, num_classes=100, cardinality=16, base_width=64):
+        super().__init__()
+        self.inplanes = 64
+        layers = [3, 3, 3]  # for depth 29
+
+        # Initial conv (no maxpool for CIFAR)
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(self.inplanes)
+        self.relu = nn.ReLU(inplace=True)
+
+        # Stages
+        self.layer1 = self._make_layer(ResNeXtBottleneck, 64,  layers[0], stride=1,
+                                       cardinality=cardinality, base_width=base_width)
+        self.layer2 = self._make_layer(ResNeXtBottleneck, 128, layers[1], stride=2,
+                                       cardinality=cardinality, base_width=base_width)
+        self.layer3 = self._make_layer(ResNeXtBottleneck, 256, layers[2], stride=2,
+                                       cardinality=cardinality, base_width=base_width)
+
+        # Classifier
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(256 * ResNeXtBottleneck.expansion, num_classes)
+
+        # Init
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1.0)
+                nn.init.constant_(m.bias, 0.0)
+            elif isinstance(m, nn.Linear):
+                nn.init.constant_(m.bias, 0.0)
+
+    def _make_layer(self, block, planes, blocks, stride, cardinality, base_width):
+        layers = []
+        layers.append(block(self.inplanes, planes, stride=stride,
+                            cardinality=cardinality, base_width=base_width))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes, stride=1,
+                                cardinality=cardinality, base_width=base_width))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
 
 def create_model(num_classes, device):
     """Create and initialize the model"""
-    model = WideResNet(depth=28, widen_factor=10, drop_rate=0.1, num_classes=num_classes)
+    # model = WideResNet(depth=28, widen_factor=10, drop_rate=0.2, num_classes=num_classes)
+    model = ResNeXt29(num_classes=num_classes, cardinality=16, base_width=64)
     model = model.to(device)
     return model

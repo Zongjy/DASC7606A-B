@@ -64,7 +64,7 @@ class ImageAugmenter:
                 hole_height_range=(6, 10),
                 hole_width_range=(6, 10),
                 fill=0,
-                p=0.25
+                p=0.5
             ),
         ])
 

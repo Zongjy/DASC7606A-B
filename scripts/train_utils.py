@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, random_split
-from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
@@ -140,8 +139,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     correct = 0
     total = 0
 
-    scaler = GradScaler("cuda")
-
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
 
     for inputs, labels in progress_bar:
@@ -151,14 +148,12 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        with autocast("cuda"):
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
 
         # Backward pass and optimize
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
 
         # Statistics
         running_loss += loss.item() * inputs.size(0)
@@ -200,9 +195,8 @@ def validate_epoch(model, dataloader, criterion, device):
             inputs, labels = inputs.to(device), labels.to(device)
 
             # Forward pass
-            with autocast("cuda"):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
 
             # Statistics
             running_loss += loss.item() * inputs.size(0)

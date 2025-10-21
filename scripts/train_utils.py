@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, random_split
-from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
@@ -105,20 +104,30 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
     """
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # optimizer = optim.AdamW(
+    #     param_groups_weight_decay(model, weight_decay=weight_decay),
+    #     lr=lr, 
+    # )
     optimizer = optim.SGD(
-        param_groups_weight_decay(model, weight_decay=5e-4),
+        param_groups_weight_decay(model, weight_decay=weight_decay),
         lr=lr,
         momentum=0.9,
-        weight_decay=weight_decay,
         nesterov=True
     )
 
     # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.2, patience=5,
-        threshold=1e-3, min_lr=1e-5
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode="min", factor=0.2, patience=5,
+    #     threshold=1e-3, min_lr=1e-5
+    # )
+    warmup = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    cosine = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=200 - 5, eta_min=1e-4
     )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[5]
+    )
+
 
     return criterion, optimizer, scheduler
 
@@ -140,7 +149,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     correct = 0
     total = 0
 
-    scaler = GradScaler("cuda")
 
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
 
@@ -151,14 +159,12 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        with autocast("cuda"):
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
 
         # Backward pass and optimize
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
 
         # Statistics
         running_loss += loss.item() * inputs.size(0)
@@ -200,9 +206,8 @@ def validate_epoch(model, dataloader, criterion, device):
             inputs, labels = inputs.to(device), labels.to(device)
 
             # Forward pass
-            with autocast("cuda"):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
 
             # Statistics
             running_loss += loss.item() * inputs.size(0)

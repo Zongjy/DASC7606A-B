@@ -83,7 +83,7 @@ def parse_args():
     # Checkpointing
     parser.add_argument("--save_freq", type=int, default=1,
                         help="Save checkpoint every N epochs")
-    parser.add_argument("--early_stopping_patience", type=int, default=10,
+    parser.add_argument("--early_stopping_patience", type=int, default=50,
                         help="Early stopping patience")
 
     # Hardware
@@ -93,7 +93,7 @@ def parse_args():
                         help="Number of data loading workers")
 
     # Random seeds
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=3407,
                         help="Random seed for reproducibility")
 
     return parser.parse_args()
@@ -192,7 +192,8 @@ def train(args, model: nn.Module):
         val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device)
 
         # Update learning rate based on validation loss
-        scheduler.step(val_loss)
+        # scheduler.step(val_loss)
+        scheduler.step()
 
         # Store metrics for plotting
         train_losses.append(train_loss)

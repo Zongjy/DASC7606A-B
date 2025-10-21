@@ -38,25 +38,15 @@ class ImageAugmenter:
 
         self.pipeline = A.Compose([
             A.OneOf([
-                A.ColorJitter(0.2, 0.2, 0.2, 0.1, p=1.0),
-                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
-                A.HueSaturationValue(10, 15, 10, p=1.0),
-                A.Sharpen(alpha=(0.05, 0.15), lightness=(0.8, 1.2), p=1.0),
-            ], p=0.9),
+                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=1.0),
+                A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=10, val_shift_limit=8, p=1.0),
+                A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=1.0),
+                A.ToGray(p=1.0),
+            ], p=0.5),
 
-            A.PadIfNeeded(min_height=40, min_width=40, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            A.PadIfNeeded(min_height=36, min_width=36, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
             A.RandomCrop(height=32, width=32, p=1.0),
             A.HorizontalFlip(p=0.5),
-            # A.OneOf([
-            #     A.GaussianBlur(blur_limit=3, p=1.0),
-            #     A.MotionBlur(blur_limit=3, p=1.0),
-            #     A.GaussNoise(std_range=(0.012, 0.022),   # ≈ 3~5.5 像素级 std
-            #         mean_range=(0.0, 0.0),
-            #         per_channel=False,
-            #         noise_scale_factor=1.0,
-            #         p=0.12,
-            #     ),
-            # ], p=0.15),
 
             A.CoarseDropout(
                 num_holes_range=(1, 1),

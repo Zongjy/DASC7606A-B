@@ -57,7 +57,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="CIFAR-10/100 Training Pipeline")
 
     # Dataset selection
-    parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100"], default="cifar10",
+    parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100"], default="cifar100",
                         help="Dataset to use (cifar10 or cifar100)")
 
     # Data paths
@@ -73,17 +73,17 @@ def parse_args():
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=30,
+    parser.add_argument("--num_epochs", type=int, default=100,
                         help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.001,
+    parser.add_argument("--lr", type=float, default=0.1,
                         help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-4,
+    parser.add_argument("--weight_decay", type=float, default=5e-4,
                         help="Weight decay (L2 penalty)")
 
     # Checkpointing
     parser.add_argument("--save_freq", type=int, default=1,
                         help="Save checkpoint every N epochs")
-    parser.add_argument("--early_stopping_patience", type=int, default=10,
+    parser.add_argument("--early_stopping_patience", type=int, default=25,
                         help="Early stopping patience")
 
     # Hardware
@@ -192,7 +192,8 @@ def train(args, model: nn.Module):
         val_loss, val_acc = validate_epoch(model, val_loader, criterion, args.device)
 
         # Update learning rate based on validation loss
-        scheduler.step(val_loss)
+        # scheduler.step(val_loss)
+        scheduler.step()
 
         # Store metrics for plotting
         train_losses.append(train_loss)

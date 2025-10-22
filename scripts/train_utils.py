@@ -15,7 +15,8 @@ def load_transforms():
     return transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize((0.5071, 0.4867, 0.4408),
+                            (0.2675, 0.2565, 0.2761))
     ])
 
 def load_data(data_dir, batch_size):
@@ -40,8 +41,8 @@ def load_data(data_dir, batch_size):
     val_dataset = datasets.ImageFolder(root=data_dir + "/../../raw/val", transform=data_transforms)
 
     # Create data loaders for training and validation
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     # Print dataset summary
     print(f"Dataset loaded from: {data_dir}")
@@ -52,6 +53,19 @@ def load_data(data_dir, batch_size):
 
     return train_loader, val_loader
 
+def param_groups_weight_decay(model, weight_decay=5e-4):
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim == 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
 
 def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
     """
@@ -66,9 +80,22 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
         optimizer: The optimizer
         scheduler: The scheduler
     """
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.SGD(
+        param_groups_weight_decay(model, weight_decay=weight_decay),
+        lr=lr,
+        momentum=0.9,
+        nesterov=True
+    )
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
+    warmup = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    cosine = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=100 - 5, eta_min=1e-4
+    )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[5]
+    )
     return criterion, optimizer, scheduler
 
 

@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 from typing import List, Tuple
 
+import cv2
 import numpy as np
 import torch
 import albumentations as A
@@ -40,30 +41,55 @@ class ImageAugmenter:
         self._set_seed()
 
         # Define Albumentations pipeline
-        self.transform = A.Compose(
-            [
-                A.Rotate(limit=15, p=0.8),
-                A.HorizontalFlip(p=0.5),
-                A.ShiftScaleRotate(
-                    shift_limit=0.1,
-                    scale_limit=0.1,
-                    rotate_limit=0,
-                    p=0.8,
-                    border_mode=0,  # cv2.BORDER_CONSTANT
-                ),
-                A.ColorJitter(
-                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.8
-                ),
-                A.OneOf(
-                    [
-                        A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-                        A.MotionBlur(blur_limit=7, p=0.5),
-                    ],
-                    p=0.3,
-                ),
-                A.RandomBrightnessContrast(p=0.2),
-            ]
-        )
+        # self.transform = A.Compose(
+        #     [
+        #         A.Rotate(limit=15, p=0.8),
+        #         A.HorizontalFlip(p=0.5),
+        #         A.ShiftScaleRotate(
+        #             shift_limit=0.1,
+        #             scale_limit=0.1,
+        #             rotate_limit=0,
+        #             p=0.8,
+        #             border_mode=0,  # cv2.BORDER_CONSTANT
+        #         ),
+        #         A.ColorJitter(
+        #             brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.8
+        #         ),
+        #         A.OneOf(
+        #             [
+        #                 A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+        #                 A.MotionBlur(blur_limit=7, p=0.5),
+        #             ],
+        #             p=0.3,
+        #         ),
+        #         A.RandomBrightnessContrast(p=0.2),
+        #     ]
+        # )
+        self.transform = A.Compose([
+            A.OneOf([
+                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=1.0),
+                A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=10, val_shift_limit=8, p=1.0),
+                A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=1.0),
+                A.ToGray(p=1.0),
+            ], p=0.5),
+
+            A.OneOf([
+                A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+                A.MotionBlur(blur_limit=7, p=0.5),
+            ], p=0.3),
+
+            A.PadIfNeeded(min_height=36, min_width=36, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            A.RandomCrop(height=32, width=32, p=1.0),
+            A.HorizontalFlip(p=0.5),
+
+            A.CoarseDropout(
+                num_holes_range=(1, 1),
+                hole_height_range=(6, 10),
+                hole_width_range=(6, 10),
+                fill=0,
+                p=0.25
+            ),
+        ])
 
     def _set_seed(self):
         """Set random seeds for reproducibility."""

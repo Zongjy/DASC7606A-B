@@ -1,5 +1,7 @@
 import os
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,15 +10,49 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 
+def mixup_data(x, y, alpha=1.0):
+    """Apply mixup to a batch"""
+    if alpha <= 0:
+        return x, y, y, 1.0
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+
+def cutmix_data(x, y, alpha=1.0):
+    """Apply cutmix to a batch"""
+    if alpha <= 0:
+        return x, y, y, 1.0
+    lam = np.random.beta(alpha, alpha)
+    batch_size, _, h, w = x.size()
+    index = torch.randperm(batch_size).to(x.device)
+
+    cx, cy = np.random.randint(w), np.random.randint(h)
+    bw, bh = int(w * np.sqrt(1 - lam)), int(h * np.sqrt(1 - lam))
+    x1, y1 = np.clip(cx - bw // 2, 0, w), np.clip(cy - bh // 2, 0, h)
+    x2, y2 = np.clip(cx + bw // 2, 0, w), np.clip(cy + bh // 2, 0, h)
+
+    mixed_x = x.clone()
+    mixed_x[:, :, y1:y2, x1:x2] = x[index, :, y1:y2, x1:x2]
+    lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+
 def load_transforms():
     """
     Load the data transformations
     """
     return transforms.Compose([
         transforms.Resize((32, 32)),
+        # transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10),
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408),
-                            (0.2675, 0.2565, 0.2761))
+                            (0.2675, 0.2565, 0.2761)),
+        # transforms.RandomErasing(p=0.25)
     ])
 
 def load_data(data_dir, batch_size):
@@ -80,26 +116,29 @@ def define_loss_and_optimizer(model: nn.Module, lr: float, weight_decay: float):
         optimizer: The optimizer
         scheduler: The scheduler
     """
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.0)
     # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     optimizer = optim.SGD(
         param_groups_weight_decay(model, weight_decay=weight_decay),
         lr=lr,
         momentum=0.9,
-        nesterov=True
+        nesterov=False
     )
     # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
-    warmup = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    warmup = optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, total_iters=20
+    )
     cosine = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=100 - 5, eta_min=1e-4
+        optimizer, T_max=300-20, eta_min=1e-6
     )
     scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup, cosine], milestones=[5]
+        optimizer, schedulers=[warmup, cosine], milestones=[20]
     )
     return criterion, optimizer, scheduler
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, device,
+                use_mixup=True, use_cutmix=True, mixup_alpha=1.0, cutmix_alpha=1.0):
     """
     Train the model for one epoch
     Args:
@@ -125,8 +164,19 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         optimizer.zero_grad()
 
         # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        r = np.random.rand()
+        if use_mixup and r < 0.5:
+            inputs, targets_a, targets_b, lam = mixup_data(inputs, labels, mixup_alpha)
+            outputs = model(inputs)
+            loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+        elif use_cutmix:
+            inputs, targets_a, targets_b, lam = cutmix_data(inputs, labels, cutmix_alpha)
+            outputs = model(inputs)
+            loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+        else:
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
 
         # Backward pass and optimize
         loss.backward()

@@ -1,164 +1,290 @@
+from typing import Type, Any, Callable, Union, List, Optional
+from functools import partial
+
+import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
+from torch import Tensor
 
 
-class SimpleCNN(nn.Module):
-    """
-    A simple CNN architecture for image classification
-    """
-
-    def __init__(self, num_classes=10):
-        super(SimpleCNN, self).__init__()
-        # Convolutional layers: progressively increase number of filters (3 -> 32 -> 64 -> 128)
-        # 3x3 kernels with padding=1 maintain spatial dimensions before pooling
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)  # 2x2 pooling reduces spatial dimensions by half
-        # Fully connected layers: flatten feature maps and classify
-        self.fc1 = nn.Linear(128 * 4 * 4, 512)  # 128 channels * 4x4 spatial resolution
-        self.fc2 = nn.Linear(512, num_classes)
-        self.dropout = nn.Dropout(0.5)  # Dropout for regularization
-
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = self.pool(F.relu(self.conv3(x)))
-        x = x.view(-1, 128 * 4 * 4)
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.fc2(x)
-        return x
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
+    """3x3 convolution with padding"""
+    return nn.Conv2d(
+        in_planes,
+        out_planes,
+        kernel_size=3,
+        stride=stride,
+        padding=dilation,
+        groups=groups,
+        bias=False,
+        dilation=dilation,
+    )
 
 
-# ## WideResNet-28-10
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
-class WRNBasicBlock(nn.Module):
-    """Basic residual block used in WideResNet"""
-    def __init__(self, in_planes, out_planes, stride, drop_rate=0.0, use_se=False):
-        super(WRNBasicBlock, self).__init__()
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.relu1 = nn.ReLU(inplace=True)
-        self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                               padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_planes)
-        self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(out_planes, out_planes, kernel_size=3, stride=1,
-                               padding=1, bias=False)
-        self.drop_rate = drop_rate
-        self.equalInOut = (in_planes == out_planes)
-        self.shortcut = (nn.Identity() if self.equalInOut else
-                         nn.Conv2d(in_planes, out_planes, 1, stride=stride, bias=False))
-        # SE block
-        self.use_se = use_se
-        if self.use_se:
-            self.se = SEBlock(out_planes, reduction=16)
 
-    def forward(self, x):
-        out = self.relu1(self.bn1(x))
-        if not self.equalInOut:
-            x = self.shortcut(out)
-        out = self.conv1(out)
-        out = self.relu2(self.bn2(out))
-        if self.drop_rate > 0:
-            out = F.dropout(out, p=self.drop_rate, training=self.training)
+class BasicBlock(nn.Module):
+    expansion: int = 1
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        act_layer=None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = partial(nn.ReLU, inplace=True)
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.act = act_layer()
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+
         out = self.conv2(out)
-        if self.use_se:
-            out = self.se(out)
-        return x + out
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.act(out)
+
+        return out
 
 
-class WRNNetworkBlock(nn.Module):
-    """Stack of BasicBlocks"""
-    def __init__(self, nb_layers, in_planes, out_planes, block, stride, drop_rate=0.0, use_se=False):
-        super(WRNNetworkBlock, self).__init__()
-        layers = []
-        for i in range(nb_layers):
-            layers.append(block(i == 0 and in_planes or out_planes,
-                                out_planes,
-                                i == 0 and stride or 1,
-                                drop_rate,
-                                use_se=use_se))
-        self.layer = nn.Sequential(*layers)
+class Bottleneck(nn.Module):
+    # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
+    # while original implementation places the stride at the first 1x1 convolution(self.conv1)
+    # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
+    # This variant is also known as ResNet V1.5 and improves accuracy according to
+    # https://ngc.nvidia.com/catalog/model-scripts/nvidia:resnet_50_v1_5_for_pytorch.
 
-    def forward(self, x):
-        return self.layer(x)
+    expansion: int = 4
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        act_layer=None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = partial(nn.ReLU, inplace=True)
+        width = int(planes * (base_width / 64.0)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.act = act_layer()
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.act(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.act(out)
+
+        return out
 
 
-class WideResNet(nn.Module):
-    """
-    WideResNet model for CIFAR (e.g., WRN-28-10)
-    depth: total layers (e.g., 28)
-    widen_factor: width multiplier (e.g., 10)
-    """
-    def __init__(self, depth=28, widen_factor=10, drop_rate=0.0, num_classes=100):
-        super(WideResNet, self).__init__()
-        assert ((depth - 4) % 6 == 0), "Depth should be 6n+4"
-        n = (depth - 4) // 6
-        k = widen_factor
+class ResNet(nn.Module):
+    def __init__(
+        self,
+        block: Type[Union[BasicBlock, Bottleneck]],
+        layers: List[int],
+        num_classes: int = 1000,
+        zero_init_residual: bool = False,
+        groups: int = 1,
+        width_per_group: int = 64,
+        replace_stride_with_dilation: Optional[List[bool]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        last_stride: int = 1,
+        act_layer=None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+        
+        if act_layer is None:
+            act_layer = partial(nn.ReLU, inplace=True)
+        self._act_layer = act_layer
 
-        nStages = [16, 16*k, 32*k, 64*k]
+        self.inplanes = 64
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            # each element in the tuple indicates if we should replace
+            # the 2x2 stride with a dilated convolution instead
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError(
+                "replace_stride_with_dilation should be None "
+                f"or a 3-element tuple, got {replace_stride_with_dilation}"
+            )
+        self.groups = groups
+        self.base_width = width_per_group
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = norm_layer(self.inplanes)
+        self.act = act_layer()
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=last_stride, dilate=replace_stride_with_dilation[2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        # 1st conv before any network block
-        self.conv1 = nn.Conv2d(3, nStages[0], 3, padding=1, bias=False)
-
-        # 1st, 2nd and 3rd block
-        self.block1 = WRNNetworkBlock(n, nStages[0], nStages[1], WRNBasicBlock, 1, drop_rate, use_se=True)
-        self.block2 = WRNNetworkBlock(n, nStages[1], nStages[2], WRNBasicBlock, 2, drop_rate, use_se=True)
-        self.block3 = WRNNetworkBlock(n, nStages[2], nStages[3], WRNBasicBlock, 2, drop_rate, use_se=True)
-
-        # global average pooling and classifier
-        self.bn1 = nn.BatchNorm2d(nStages[3])
-        self.relu = nn.ReLU(inplace=True)
-        self.fc = nn.Linear(nStages[3], num_classes)
-
-        # init
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.block1(out)
-        out = self.block2(out)
-        out = self.block3(out)
-        out = self.relu(self.bn1(out))
-        out = F.adaptive_avg_pool2d(out, 1)
-        out = out.view(-1, out.size(1))
-        return self.fc(out)
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
+        if zero_init_residual:
+            for m in self.modules():
+                if isinstance(m, Bottleneck):
+                    nn.init.constant_(m.bn3.weight, 0)  # type: ignore[arg-type]
+                elif isinstance(m, BasicBlock):
+                    nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
-class SEBlock(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super(SEBlock, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid()
+    def _make_layer(
+        self,
+        block: Type[Union[BasicBlock, Bottleneck]],
+        planes: int,
+        blocks: int,
+        stride: int = 1,
+        dilate: bool = False,
+    ) -> nn.Sequential:
+        norm_layer = self._norm_layer
+        act_layer = self._act_layer
+        downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                # ref https://github.com/dmlc/gluon-cv/blob/master/gluoncv/model_zoo/resnetv1b.py#L210
+                nn.AvgPool2d(kernel_size=stride, stride=stride, ceil_mode=True, count_include_pad=False),
+                conv1x1(self.inplanes, planes * block.expansion, 1),
+                norm_layer(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(
+            block(
+                self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer, act_layer
+            )
         )
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(
+                block(
+                    self.inplanes,
+                    planes,
+                    groups=self.groups,
+                    base_width=self.base_width,
+                    dilation=self.dilation,
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                )
+            )
 
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
+        return nn.Sequential(*layers)
+
+    def _forward_impl(self, x: Tensor) -> Tensor:
+        # See note [TorchScript super()]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+
+        return x
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward_impl(x)
+
+
+def _resnet(
+    arch: str,
+    block: Type[Union[BasicBlock, Bottleneck]],
+    layers: List[int],
+    **kwargs: Any,
+) -> ResNet:
+    model = ResNet(block, layers, **kwargs)
+    return model
+
+def resnet50(**kwargs: Any) -> ResNet:
+    r"""ResNet-50 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    """
+    return _resnet("resnet50", Bottleneck, [3, 4, 6, 3], **kwargs)
 
 
 def create_model(num_classes, device):
     """Create and initialize the model"""
-    # model = SimpleCNN(num_classes=num_classes)
-    model = WideResNet(
-        depth=28, 
-        widen_factor=10, 
-        drop_rate=0.3, 
-        num_classes=num_classes
-    )
+    model = resnet50(num_classes=num_classes)
     model = model.to(device)
     return model

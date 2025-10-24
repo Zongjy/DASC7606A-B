@@ -66,21 +66,21 @@ class ImageAugmenter:
         #     ]
         # )
         self.transform = A.Compose([
-            A.OneOf([
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=1.0),
+            A.PadIfNeeded(min_height=40, min_width=40, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
+            A.RandomCrop(height=32, width=32, p=1.0),
+            A.HorizontalFlip(p=0.5),
+
+            A.SomeOf([
+                A.Affine(rotate=(-15, 15), shear=(-12, 12), translate_percent={"x": (-0.125, 0.125), "y": (-0.125, 0.125)}, scale=(0.9, 1.1), p=1.0),
+                A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.08, p=1.0),
+                A.Equalize(p=1.0),
                 A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=10, val_shift_limit=8, p=1.0),
                 A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=1.0),
                 A.ToGray(p=1.0),
-            ], p=0.5),
-
-            A.OneOf([
                 A.GaussianBlur(blur_limit=(3, 5), p=0.2),
                 A.MotionBlur(blur_limit=7, p=0.5),
-            ], p=0.3),
-
-            A.PadIfNeeded(min_height=36, min_width=36, border_mode=cv2.BORDER_REFLECT_101, p=1.0),
-            A.RandomCrop(height=32, width=32, p=1.0),
-            A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
+            ], n=2, p=0.3),
 
             A.CoarseDropout(
                 num_holes_range=(1, 1),

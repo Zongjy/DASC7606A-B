@@ -67,13 +67,13 @@ def parse_args():
                         help="Directory to save results")
 
     # Data augmentation
-    parser.add_argument("--aug_count", type=int, default=3,
+    parser.add_argument("--aug_count", type=int, default=2,
                         help="Number of augmentations per image")
 
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=100,
+    parser.add_argument("--num_epochs", type=int, default=300,
                         help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.1,
                         help="Learning rate")
@@ -83,13 +83,13 @@ def parse_args():
     # Checkpointing
     parser.add_argument("--save_freq", type=int, default=1,
                         help="Save checkpoint every N epochs")
-    parser.add_argument("--early_stopping_patience", type=int, default=25,
+    parser.add_argument("--early_stopping_patience", type=int, default=50,
                         help="Early stopping patience")
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training (cuda/cpu)")
-    parser.add_argument("--num_workers", type=int, default=4,
+    parser.add_argument("--num_workers", type=int, default=8,
                         help="Number of data loading workers")
 
     # Random seeds
